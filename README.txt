@@ -23,24 +23,33 @@ If that fails, run this in PyCharm's Terminal tab:
 A connection/SSL error usually means the company network blocks the
 Python package site: ask IT for the proxy or internal package mirror.
 
-WORKFLOW (v4.0 layout)
-----------------------
-1  Label this evidence: entity, period, account, JE/ticket ref (all
-   optional). "File name:" shows exactly what the file will be called.
-   Labels stay filled in for the next capture; "Clear labels" resets them.
-2  Capture: click a tile (Area, One screen, All screens, Each screen).
-   The display picker only appears for One screen. Tick "Mark up after
-   capture" / "Copy to clipboard", pick a Delay if needed, then click the
-   big Capture button, press F9, or press Ctrl+Shift+F9 from any app.
-3  Save to: pick a folder from the drop-down. Browse… for a new one,
-   "Keep in list" to remember it, "Open folder" to see it in Explorer.
-Recent evidence: select a file, then Open / Mark up / Copy / Show in
-folder. Marked-up copies show a 🖍 in the list.
+HOW IT WORKS (v5.0)
+-------------------
+1. Label (optional): entity, period, account, JE/ticket ref. Each box
+   remembers what you've used before; pick it from the drop-down.
+   "Will be saved as" shows the exact file name.
+2. Capture: choose Area, One screen, All screens or Each screen, then
+   click Capture, press F9, or press Ctrl+Shift+F9 from any app.
+3. Paste: the screenshot is already on the clipboard. Ctrl+V in Excel.
 
-The ⚙ Settings button (top right) holds the set-once options:
-shortcut key, filename prefix, include taskbar clock, open after capture.
-The note at the top right shows whether the any-app shortcut is active
-(green) or unavailable (orange). Hover over any button for a tip.
+After every capture a small preview appears in the bottom-right corner.
+It never needs a click and disappears on its own. From it you can:
+  - Mark up: highlight, box or redact (also: click the picture)
+  - Show in folder
+  - Undo: deletes that screenshot and removes it from the index
+
+Save to: folders you use are remembered in the drop-down automatically.
+Recent: select a file to see a preview, then Open / Mark up / Copy /
+Show in folder.
+Settings (top right): shortcut key, copy to clipboard, taskbar clock,
+open after capture, filename prefix.
+
+If evidence_index.csv is open in Excel when you capture, nothing fails:
+the screenshot is saved and the index is updated once you close it.
+
+Redact: draws a solid black box in the marked copy. The original
+screenshot is always kept unredacted next to it, so share the _marked
+file, not the original, when something must stay hidden.
 
 WHERE FILES GO
 --------------
@@ -62,9 +71,9 @@ filenames if your policy prohibits it.
 CUSTOM SAVE FOLDERS (v3.2)
 --------------------------
 The save-folder box in step 3 is a drop-down of your saved folders.
-  - Browse… (or type a path), then click "★ Keep in list" to add it.
+  - Browse… to a folder (or capture into one) and it is added for you.
   - Pick any saved folder from the drop-down to switch to it.
-  - "Remove from list" only removes it from the drop-down; nothing on disk
+  - "Remove this folder from the list" only removes it from the drop-down; nothing on disk
     is deleted.
   - Filename prefix (optional, in ⚙ Settings) is put at the start of each file name,
     e.g. Screenshot_2026-11-15_09-51-02_2026-11_Region.png

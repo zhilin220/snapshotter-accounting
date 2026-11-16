@@ -452,6 +452,9 @@ def render_markup(base: Image.Image, shapes: list[dict]) -> Image.Image:
     for s in shapes:
         if s["kind"] == "box":
             d.rectangle(s["box"], outline=BOX_COLORS.get(s.get("color"), BOX_COLORS["Red"]) + (255,), width=width)
+    for s in shapes:  # redactions last, so nothing can show through them
+        if s["kind"] == "redact":
+            d.rectangle(s["box"], fill=(0, 0, 0, 255))
     return out.convert("RGB")
 
 
@@ -475,27 +478,30 @@ class MarkupEditor:
         win = self.win = tk.Toplevel(master)
         win.title(f"Mark up — {self.path.name}")
         win.configure(bg=BG)
+        win.minsize(900, 0)  # room for the toolbar even when the screenshot is small
         sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
         self.scale = min(1.0, (sw * 0.88) / self.base.width, (sh * 0.72) / self.base.height)
         self.view_size = (max(1, round(self.base.width * self.scale)), max(1, round(self.base.height * self.scale)))
 
         bar = tk.Frame(win, bg=BG, padx=12, pady=10)
         bar.pack(fill="x")
-        for value, text in (("highlight", "🖍  Highlight"), ("box", "▭  Box")):
+        for value, text in (("highlight", "🖍  Highlight"), ("box", "▭  Box"), ("redact", "■  Redact")):
             tk.Radiobutton(bar, text=text, value=value, variable=self.tool, indicatoron=False,
                            font=("Segoe UI", 10), padx=12, pady=5, bg="#ffffff", selectcolor="#dbeafe",
                            relief="ridge", cursor="hand2").pack(side="left", padx=(0, 6))
-        tk.Label(bar, text="Box color", bg=BG, fg=MUTED, font=("Segoe UI", 9)).pack(side="left", padx=(10, 5))
-        ttk.Combobox(bar, textvariable=self.color, values=list(BOX_COLORS), state="readonly",
-                     width=7).pack(side="left")
+        # Colour dots for the Box tool: click one to pick it.
+        self._dots = tk.Canvas(bar, width=len(BOX_COLORS) * 26 + 4, height=28, bg=BG, highlightthickness=0,
+                               cursor="hand2")
+        self._dots.pack(side="left", padx=(8, 0))
+        self._dots.bind("<Button-1>", self._pick_color)
+        self._draw_dots()
         ttk.Button(bar, text="↶ Undo", command=self.undo).pack(side="left", padx=(14, 0))
         ttk.Button(bar, text="Clear", command=self.clear).pack(side="left", padx=(6, 0))
-        ttk.Button(bar, text="Save marked copy", style="Primary.TButton",
-                   command=self.save).pack(side="right")
-        ttk.Button(bar, text="Skip (keep original only)", command=self.skip).pack(side="right", padx=(0, 8))
+        ttk.Button(bar, text="Done", style="Primary.TButton", command=self.save).pack(side="right")
+        ttk.Button(bar, text="Cancel", command=self.skip).pack(side="right", padx=(0, 8))
 
-        tk.Label(win, text="Drag on the image to highlight or box a section.   Ctrl+Z undo · Enter save · Esc skip.   "
-                           "The original screenshot is kept unchanged.",
+        tk.Label(win, text="Drag on the image.   Ctrl+Z undo · Enter done · Esc cancel.   Your original screenshot "
+                           "is kept unchanged (so Redact hides things only in the marked copy).",
                  bg=BG, fg=MUTED, font=("Segoe UI", 9)).pack(anchor="w", padx=12)
         self.canvas = tk.Canvas(win, width=self.view_size[0], height=self.view_size[1],
                                 highlightthickness=1, highlightbackground=BORDER, cursor="crosshair")
@@ -516,6 +522,21 @@ class MarkupEditor:
         win.after(400, lambda: win.winfo_exists() and win.attributes("-topmost", False))
         win.focus_force()
 
+    def _draw_dots(self):
+        c = self._dots
+        c.delete("all")
+        for i, (name, rgb) in enumerate(BOX_COLORS.items()):
+            x = 4 + i * 26
+            if name == self.color.get():
+                c.create_oval(x - 1, 2, x + 23, 26, outline=INK, width=2)
+            c.create_oval(x + 3, 6, x + 19, 22, fill="#%02x%02x%02x" % rgb, outline="")
+
+    def _pick_color(self, event):
+        index = max(0, min(len(BOX_COLORS) - 1, (event.x - 4) // 26))
+        self.color.set(list(BOX_COLORS)[index])
+        self.tool.set("box")
+        self._draw_dots()
+
     def _redraw(self):
         view = render_markup(self.base, self.shapes)
         if self.scale < 1:
@@ -526,8 +547,9 @@ class MarkupEditor:
 
     def _down(self, e):
         self._drag = (e.x, e.y, self.canvas.create_rectangle(e.x, e.y, e.x, e.y, dash=(4, 2), width=2,
-                                                             outline="#f59e0b" if self.tool.get() == "highlight"
-                                                             else "#%02x%02x%02x" % BOX_COLORS[self.color.get()]))
+                                                             outline={"highlight": "#f59e0b", "redact": "#111827"}.get(
+                                                                 self.tool.get(),
+                                                                 "#%02x%02x%02x" % BOX_COLORS[self.color.get()])))
 
     def _move(self, e):
         if self._drag:
@@ -651,6 +673,8 @@ class SnapShotterApp:
         self._from_hotkey = False     # current capture was started from another app
         self._was_minimized = False
         self._toast = None
+        self._index_waiting = False
+        self._label_boxes = {}
         self.status = tk.StringVar(value="Ready.")
         self.monitors: list[dict] = []
         self.selected_monitor_index = 0
@@ -668,6 +692,7 @@ class SnapShotterApp:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._apply_hotkey()
         self.root.after(100, self._poll_hotkey)
+        self._write_index_row()  # write any index rows that were waiting from last time
 
     # ----- shortcut from any app -------------------------------------------
     def _apply_hotkey(self):
@@ -685,11 +710,12 @@ class SnapShotterApp:
         ok = combo is not None and self.hotkey_status.get().startswith("✓")
         self.shortcut_hint.configure(
             text=(f"⌨ {name} works in any app" if ok else
-                  "⌨ Shortcut off — F9 in this window" if combo is None else
+                  "⌨ F9 in this window" if combo is None else
                   f"⚠ {name} unavailable — see Settings"),
             fg="#15803d" if ok else ("#b45309" if combo is not None else MUTED))
-        self.capture_btn.configure(
-            text=f"✂  Capture      F9 here  ·  {name} from any app" if ok else "✂  Capture      (F9)")
+        if not self._busy:
+            self.status.set(f"Ready. Click Capture, or press {name} in any app." if ok
+                            else "Ready. Click Capture or press F9.")
         self._persist()
 
     def _poll_hotkey(self):
@@ -801,38 +827,40 @@ class SnapShotterApp:
         right.pack(side="right", anchor="n")
         settings_btn = ttk.Button(right, text="⚙  Settings", command=self.open_settings)
         settings_btn.pack(side="right")
-        Tooltip(settings_btn, "Shortcut key, filename prefix, taskbar clock, open after capture")
+        Tooltip(settings_btn, "Shortcut key, clipboard, taskbar clock, filename prefix")
         self.shortcut_hint = tk.Label(right, text="", bg=BG, fg="#15803d", font=("Segoe UI", 9, "bold"))
         self.shortcut_hint.pack(side="right", padx=(0, 12), pady=(6, 0))
         ttk.Label(header, text="SnapShotter", font=("Segoe UI", 22, "bold")).pack(anchor="w")
-        ttk.Label(header, text="①  Label it   →   ②  Capture   →   ③  Paste with Ctrl+V",
+        ttk.Label(header, text="Capture it. It's labeled, dated, filed and ready to paste.",
                   style="Muted.TLabel").pack(anchor="w", pady=(2, 0))
 
-        # ---------------------------------------------------------- 1 · labels
-        context = self._card(outer, "①  Label this evidence",
-                             "Optional. Labels go into the file name and the evidence index, "
-                             "and stay filled in for your next capture.")
+        # -------------------------------------------------------------- labels
+        context = self._card(outer, "Label",
+                             "Optional. Whatever you fill in goes into the file name and the evidence index.")
         grid = ttk.Frame(context, style="Card.TFrame")
         grid.pack(fill="x")
         grid.columnconfigure(1, weight=1)
         grid.columnconfigure(3, weight=1)
-        fields = (("Entity / company", self.entity, 0, 0), ("Period", self.period, 0, 2),
-                  ("Account", self.account, 1, 0), ("JE / ticket / ref.", self.reference, 1, 2))
-        for text, var, r, c in fields:
+        fields = (("entity", "Entity / company", 0, 0), ("period", "Period", 0, 2),
+                  ("account", "Account", 1, 0), ("reference", "JE / ticket / ref.", 1, 2))
+        for key, text, r, c in fields:
             ttk.Label(grid, text=text, style="Hint.TLabel").grid(row=r, column=c, sticky="w", padx=(0, 8), pady=4)
-            ttk.Entry(grid, textvariable=var).grid(row=r, column=c + 1, sticky="ew",
-                                                   padx=(0, 14) if c == 0 else 0, pady=4)
+            box = ttk.Combobox(grid, textvariable=getattr(self, key), values=self._label_values(key))
+            box.grid(row=r, column=c + 1, sticky="ew", padx=(0, 14) if c == 0 else 0, pady=4)
+            self._no_wheel(box)
+            Tooltip(box, "Type, or pick one you've used before from the drop-down")
+            self._label_boxes[key] = box
         preview_line = ttk.Frame(context, style="Card.TFrame")
         preview_line.pack(fill="x", pady=(8, 0))
-        clear_btn = ttk.Button(preview_line, text="Clear labels", command=self.clear_labels)
+        clear_btn = ttk.Button(preview_line, text="Clear", command=self.clear_labels)
         clear_btn.pack(side="right")
         Tooltip(clear_btn, "Empty entity, account and reference; reset period to this month")
-        ttk.Label(preview_line, text="File name:", style="Hint.TLabel").pack(side="left")
+        ttk.Label(preview_line, text="Will be saved as", style="Hint.TLabel").pack(side="left")
         self.name_preview = tk.Label(preview_line, text="", bg=CARD, fg=BLUE_DARK, font=("Consolas", 9), anchor="w")
         self.name_preview.pack(side="left", padx=(6, 0), fill="x", expand=True)
 
-        # --------------------------------------------------------- 2 · capture
-        capture = self._card(outer, "②  Capture", "Pick what to capture, then click Capture.")
+        # ------------------------------------------------------------- capture
+        capture = self._card(outer, "Capture", None)
         tiles = ttk.Frame(capture, style="Card.TFrame")
         tiles.pack(fill="x")
         self._tiles = {}
@@ -841,7 +869,7 @@ class SnapShotterApp:
             tile.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 4, 0 if i == 3 else 4))
             tiles.columnconfigure(i, weight=1, uniform="tiles")
 
-        # Display picker: only shown for "One monitor".
+        # Display picker: only shown for "One screen".
         self.picker = ttk.Frame(capture, style="Card.TFrame")
         picker_head = ttk.Frame(self.picker, style="Card.TFrame")
         picker_head.pack(fill="x", pady=(10, 5))
@@ -855,31 +883,24 @@ class SnapShotterApp:
         self.display_summary = ttk.Label(self.picker, text="", style="Hint.TLabel")
         self.display_summary.pack(anchor="w", pady=(5, 0))
 
+        self.capture_btn = ttk.Button(capture, text="Capture", style="Primary.TButton", command=self.capture)
+        self.capture_btn.pack(fill="x", pady=(12, 0))
         self.capture_opts = ttk.Frame(capture, style="Card.TFrame")
-        self.capture_opts.pack(fill="x", pady=(12, 0))
-        cb = ttk.Checkbutton(self.capture_opts, text="🖍 Mark up after capture",
-                             variable=self.markup_after, command=self._persist)
-        cb.pack(side="left")
-        Tooltip(cb, "Opens a window to add yellow highlights or boxes.\n"
-                    "The original is kept; the marked copy is saved as …_marked.png")
-        cb = ttk.Checkbutton(self.capture_opts, text="📋 Copy to clipboard",
-                             variable=self.copy_clipboard, command=self._persist)
-        cb.pack(side="left", padx=(18, 0))
-        Tooltip(cb, "Paste straight into Excel, Word or an email with Ctrl+V")
+        self.capture_opts.pack(fill="x", pady=(8, 0))
+        ttk.Label(self.capture_opts, textvariable=self.status, style="Hint.TLabel").pack(side="left")
         delay_box = ttk.Combobox(self.capture_opts, textvariable=self.delay, state="readonly", width=11,
                                  values=["No delay", "3 seconds", "5 seconds", "10 seconds"])
         delay_box.pack(side="right")
-        ttk.Label(self.capture_opts, text="⏱ Delay", style="Hint.TLabel").pack(side="right", padx=(0, 6))
-        Tooltip(delay_box, "Time to open a menu or drop-down before the capture")
+        self._no_wheel(delay_box)
+        Tooltip(delay_box, "Gives you time to open a menu or drop-down before the capture")
+        cb = ttk.Checkbutton(self.capture_opts, text="Mark up after capture",
+                             variable=self.markup_after, command=self._persist)
+        cb.pack(side="right", padx=(0, 14))
+        Tooltip(cb, "Always open the markup window (highlight, box, redact) after a capture.\n"
+                    "You can also click Mark up on the preview that appears after any capture.")
 
-        self.capture_btn = ttk.Button(capture, text="✂  Capture", style="Primary.TButton", command=self.capture)
-        self.capture_btn.pack(fill="x", pady=(12, 0))
-        ttk.Label(capture, textvariable=self.status, style="Hint.TLabel").pack(anchor="w", pady=(7, 0))
-
-        # --------------------------------------------------------- 3 · save to
-        filing = self._card(outer, "③  Save to",
-                            "Screenshots go straight into this folder (no subfolders). "
-                            "Switch folders with the drop-down.")
+        # ------------------------------------------------------------- save to
+        filing = self._card(outer, "Save to", None)
         folder_line = ttk.Frame(filing, style="Card.TFrame")
         folder_line.pack(fill="x")
         self.folder_box = ttk.Combobox(folder_line, textvariable=self.save_folder, values=self.custom_folders)
@@ -887,46 +908,64 @@ class SnapShotterApp:
         self.folder_box.bind("<<ComboboxSelected>>", lambda _e: self._folder_changed())
         self.folder_box.bind("<FocusOut>", lambda _e: self._folder_changed())
         self.folder_box.bind("<Return>", lambda _e: self._folder_changed())
-        b = ttk.Button(folder_line, text="Browse…", command=self.choose_folder)
-        b.pack(side="left", padx=(6, 0))
-        Tooltip(b, "Choose a different folder")
-        folder_btns = ttk.Frame(filing, style="Card.TFrame")
-        folder_btns.pack(fill="x", pady=(6, 0))
-        for text, cmd, tip in (("★ Keep in list", self.add_custom_folder, "Add this folder to the drop-down list"),
-                               ("✕ Remove from list", self.remove_custom_folder,
-                                "Take it off the drop-down list (nothing is deleted)"),
-                               ("📁 Open folder", self.open_folder, "Open this folder in File Explorer")):
-            b = ttk.Button(folder_btns, text=text, command=cmd)
-            b.pack(side="left", padx=(0, 6))
+        self._no_wheel(self.folder_box)
+        Tooltip(self.folder_box, "Folders you've used are remembered here")
+        for text, cmd, tip in (("Browse…", self.choose_folder, "Choose a different folder"),
+                               ("Open", self.open_folder, "Open this folder in File Explorer")):
+            b = ttk.Button(folder_line, text=text, command=cmd)
+            b.pack(side="left", padx=(6, 0))
             Tooltip(b, tip)
+        forget = tk.Label(filing, text="Remove this folder from the list", bg=CARD, fg=MUTED,
+                          font=("Segoe UI", 8, "underline"), cursor="hand2")
+        forget.pack(anchor="e", pady=(4, 0))
+        forget.bind("<Button-1>", lambda _e: self.remove_custom_folder())
+        Tooltip(forget, "Only takes it off the drop-down. Nothing is deleted.")
 
         # ---------------------------------------------------- recent evidence
-        recent = self._card(outer, "Recent evidence", None, expand=True)
-        self.history = tk.Listbox(recent, height=5, activestyle="none", relief="flat", bd=0,
+        recent = self._card(outer, "Recent", None, expand=True)
+        row = ttk.Frame(recent, style="Card.TFrame")
+        row.pack(fill="both", expand=True, pady=(2, 0))
+        holder = tk.Frame(row, width=218, height=116, bg="#f8fafc",
+                          highlightthickness=1, highlightbackground=BORDER)
+        holder.pack(side="right", padx=(8, 0))
+        holder.pack_propagate(False)
+        self.preview = tk.Label(holder, bg="#f8fafc", fg=MUTED, font=("Segoe UI", 9), cursor="hand2")
+        self.preview.pack(fill="both", expand=True)
+        self.preview.bind("<Button-1>", self.open_selected)
+        self.history = tk.Listbox(row, height=5, activestyle="none", relief="flat", bd=0,
                                   bg="#f8fafc", fg=INK, font=("Segoe UI", 9),
                                   selectbackground="#dbeafe", selectforeground=INK,
-                                  highlightthickness=1, highlightbackground=BORDER)
-        self.history.pack(fill="both", expand=True, pady=(2, 0))
+                                  highlightthickness=1, highlightbackground=BORDER, exportselection=False)
+        self.history.pack(side="left", fill="both", expand=True)
         self.history.bind("<Double-Button-1>", self.open_selected)
         self.history.bind("<<ListboxSelect>>", lambda _e: self._update_history_buttons())
         buttons = ttk.Frame(recent, style="Card.TFrame")
         buttons.pack(fill="x", pady=(8, 0))
         self._history_buttons = []
         for text, cmd, tip in (("Open", self.open_selected, "Open the image (or double-click it)"),
-                               ("🖍 Mark up", self.markup_selected, "Add highlights or boxes; saves a …_marked copy"),
+                               ("🖍 Mark up", self.markup_selected,
+                                "Highlight, box or redact. Saves a separate …_marked copy"),
                                ("📋 Copy", self.copy_selected, "Copy the image to paste with Ctrl+V"),
                                ("Show in folder", self.show_selected, "Open File Explorer with this file selected")):
             b = ttk.Button(buttons, text=text, command=cmd)
             b.pack(side="left", padx=(0, 6))
             Tooltip(b, tip)
             self._history_buttons.append(b)
-        ttk.Button(buttons, text="↻ Refresh", command=self.refresh_history).pack(side="right")
+        ttk.Button(buttons, text="↻", width=3, command=self.refresh_history).pack(side="right")
 
         for var in (self.entity, self.account, self.period, self.reference, self.prefix, self.mode):
             var.trace_add("write", lambda *_a: self._update_name_preview())
         self._select_tile(self.mode.get())
 
     # ----- small UI helpers ---------------------------------------------------
+    def _no_wheel(self, widget):
+        """Stop the mouse wheel from silently changing a drop-down's value; scroll the page instead."""
+        def on_wheel(event):
+            if self._body_scrollbar.winfo_ismapped():
+                self._body_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+            return "break"
+        widget.bind("<MouseWheel>", on_wheel)
+
     def _card(self, parent, title, subtitle, expand=False):
         card = ttk.Frame(parent, style="Card.TFrame", padding=(16, 13))
         card.pack(fill="both" if expand else "x", expand=expand, pady=(0, 10))
@@ -962,7 +1001,7 @@ class SnapShotterApp:
             parts[1].configure(fg=BLUE_DARK if on else INK)
         if value == "monitor":
             if not self.picker.winfo_ismapped():
-                self.picker.pack(fill="x", before=self.capture_opts)
+                self.picker.pack(fill="x", before=self.capture_btn)
             self._draw_monitor_picker()
         elif self.picker.winfo_ismapped():
             self.picker.pack_forget()
@@ -996,9 +1035,10 @@ class SnapShotterApp:
         self.period.set(datetime.now().strftime("%Y-%m"))
 
     def _update_history_buttons(self):
-        state = "!disabled" if self.history.curselection() else "disabled"
+        state = "!disabled" if self._selected_path() else "disabled"
         for b in self._history_buttons:
             b.state([state])
+        self._update_preview()
 
     # ----- settings window -----------------------------------------------------
     def open_settings(self):
@@ -1030,8 +1070,10 @@ class SnapShotterApp:
         ttk.Entry(line, textvariable=self.prefix, width=24).pack(side="left")
 
         sec = self._card(body, "Every capture", None)
+        ttk.Checkbutton(sec, text="Copy to the clipboard, ready to paste with Ctrl+V",
+                        variable=self.copy_clipboard, command=self._persist).pack(anchor="w")
         ttk.Checkbutton(sec, text="Include the taskbar so the date/time clock shows in the image",
-                        variable=self.include_taskbar, command=self._persist).pack(anchor="w")
+                        variable=self.include_taskbar, command=self._persist).pack(anchor="w", pady=(6, 0))
         ttk.Checkbutton(sec, text="Open the image after capture",
                         variable=self.open_after, command=self._persist).pack(anchor="w", pady=(6, 0))
 
@@ -1145,11 +1187,42 @@ class SnapShotterApp:
         folder = filedialog.askdirectory(initialdir=self.save_folder.get() or str(Path.home()))
         if folder:
             self.save_folder.set(str(Path(folder)))
+            self._remember_folder(self.save_folder.get())
             self._folder_changed()
 
     def _folder_changed(self):
         self.refresh_history()
         self._persist()
+
+    def _remember_folder(self, folder: str):
+        """Folders you use are added to the drop-down automatically."""
+        folder = folder.strip()
+        if folder and not any(self._same_folder(folder, f) for f in self.custom_folders):
+            self.custom_folders.append(folder)
+            del self.custom_folders[:-15]
+            self.folder_box.configure(values=self.custom_folders)
+
+    LABEL_KEYS = ("entity", "account", "period", "reference")
+
+    def _label_values(self, key: str) -> list[str]:
+        history = [v for v in self.settings.get("label_history", {}).get(key, []) if isinstance(v, str)]
+        if key != "period":
+            return history
+        now = datetime.now()
+        last = (now.year, now.month - 1) if now.month > 1 else (now.year - 1, 12)
+        suggestions = [now.strftime("%Y-%m"), f"{last[0]}-{last[1]:02d}"]
+        return suggestions + [v for v in history if v not in suggestions]
+
+    def _remember_labels(self):
+        """Keep what you typed so it's one click away next time."""
+        history = self.settings.setdefault("label_history", {})
+        for key in self.LABEL_KEYS:
+            value = getattr(self, key).get().strip()
+            if value:
+                items = [v for v in history.get(key, []) if v != value]
+                history[key] = [value] + items[:11]
+            if key in getattr(self, "_label_boxes", {}):
+                self._label_boxes[key].configure(values=self._label_values(key))
 
     @staticmethod
     def _same_folder(a: str, b: str) -> bool:
@@ -1248,23 +1321,76 @@ class SnapShotterApp:
                 pass
             self._toast = None
 
-    def _show_toast(self, title: str, detail: str):
-        """Small self-closing notice in the bottom-right corner (no click needed)."""
+    def _show_toast(self, title: str, detail: str = "", image_path: Path | None = None,
+                    actions=(), seconds: float = 7):
+        """Quiet notice in the bottom-right corner, like a screenshot preview.
+
+        Never needs a click: it fades on its own, but stays while the mouse is over it.
+        `actions` is a list of (label, callback); clicking the thumbnail runs the first one.
+        """
         self._close_toast()
+        bg = "#111827"
         t = self._toast = tk.Toplevel(self.root)
         t.overrideredirect(True)
         t.attributes("-topmost", True)
-        t.configure(bg="#111827")
-        tk.Label(t, text=title, bg="#111827", fg="white", font=("Segoe UI", 10, "bold"),
-                 anchor="w", padx=14).pack(fill="x", pady=(10, 0))
-        tk.Label(t, text=detail, bg="#111827", fg="#d1d5db", font=("Segoe UI", 9),
-                 anchor="w", justify="left", padx=14, wraplength=380).pack(fill="x", pady=(2, 10))
+        t.configure(bg=bg, padx=12, pady=12)
+
+        def run(callback):
+            self._close_toast()
+            callback()
+
+        if image_path is not None:
+            try:
+                with Image.open(image_path) as im:
+                    im = im.convert("RGB")
+                    im.thumbnail((190, 116))
+                    photo = ImageTk.PhotoImage(im)
+                thumb = tk.Label(t, image=photo, bg=bg, bd=0, highlightthickness=1,
+                                 highlightbackground="#4b5563", cursor="hand2" if actions else "")
+                thumb.image = photo
+                thumb.pack(side="left", padx=(0, 12))
+                if actions:
+                    thumb.bind("<Button-1>", lambda _e: run(actions[0][1]))
+            except Exception:
+                pass
+        right = tk.Frame(t, bg=bg)
+        right.pack(side="left", fill="both", expand=True)
+        tk.Label(right, text=title, bg=bg, fg="white", font=("Segoe UI", 10, "bold"),
+                 anchor="w", justify="left").pack(fill="x")
+        if detail:
+            tk.Label(right, text=detail, bg=bg, fg="#d1d5db", font=("Segoe UI", 9),
+                     anchor="w", justify="left", wraplength=330).pack(fill="x", pady=(2, 0))
+        if actions:
+            row = tk.Frame(right, bg=bg)
+            row.pack(anchor="w", pady=(9, 0))
+            for text, callback in actions:
+                tk.Button(row, text=text, command=lambda cb=callback: run(cb), bg="#374151", fg="white",
+                          activebackground="#4b5563", activeforeground="white", relief="flat", bd=0,
+                          padx=10, pady=4, font=("Segoe UI", 9), cursor="hand2").pack(side="left", padx=(0, 6))
         t.update_idletasks()
         x = t.winfo_screenwidth() - t.winfo_reqwidth() - 24
         y = t.winfo_screenheight() - t.winfo_reqheight() - 80
         t.geometry(f"+{x}+{y}")
-        t.bind("<Button-1>", lambda _e: self._close_toast())
-        t.after(3500, lambda w=t: (self._toast is w) and self._close_toast())
+
+        deadline = [time.monotonic() + seconds]
+
+        def tick():
+            if self._toast is not t:
+                return
+            try:
+                px, py = t.winfo_pointerxy()
+                inside = (t.winfo_rootx() <= px <= t.winfo_rootx() + t.winfo_width()
+                          and t.winfo_rooty() <= py <= t.winfo_rooty() + t.winfo_height())
+            except tk.TclError:
+                return
+            if inside:
+                deadline[0] = time.monotonic() + 2.5   # stay while the mouse is on it
+            elif time.monotonic() >= deadline[0]:
+                self._close_toast()
+                return
+            t.after(300, tick)
+
+        t.after(300, tick)
 
     def _grab_frame(self):
         """One capture of the whole desktop plus the taskbars visible at that instant."""
@@ -1403,16 +1529,65 @@ class SnapShotterApp:
                     "reference", "notes", "capture_mode", "display_or_region",
                     "file_name", "relative_path"]
 
-    def _write_index_row(self, row: dict):
+    def _write_index_row(self, row: dict | None = None) -> bool:
+        """Append a row to evidence_index.csv (plus any rows still waiting for this folder).
+
+        If the index can't be written (typically because it's open in Excel), the row is
+        kept in settings and written the next time the file is free. Captures never fail
+        because of the index.
+        """
         root = Path(self.save_folder.get()).expanduser()
-        root.mkdir(parents=True, exist_ok=True)
+        pending = [p for p in self.settings.get("pending_index", []) if isinstance(p, dict)]
+        mine = [p for p in pending if self._same_folder(str(p.get("folder", "")), str(root))]
+        rows = [p.get("row", {}) for p in mine] + ([row] if row else [])
+        if not rows:
+            return True
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            index = root / "evidence_index.csv"
+            exists = index.exists()
+            with index.open("a", newline="", encoding="utf-8-sig") as f:
+                writer = csv.DictWriter(f, fieldnames=self.INDEX_FIELDS, extrasaction="ignore")
+                if not exists:
+                    writer.writeheader()
+                writer.writerows(rows)
+        except OSError:
+            if row:
+                pending.append({"folder": str(root), "row": row})
+                self.settings["pending_index"] = pending
+                save_settings(self.settings)
+            self._index_waiting = True
+            return False
+        if mine:
+            self.settings["pending_index"] = [p for p in pending if p not in mine]
+            save_settings(self.settings)
+        return True
+
+    def _remove_index_rows(self, names: set[str]) -> None:
+        """Take rows for the given file names back out of the index (used by Undo)."""
+        root = Path(self.save_folder.get()).expanduser()
+        pending = self.settings.get("pending_index", [])
+        kept = [p for p in pending if p.get("row", {}).get("file_name") not in names]
+        if len(kept) != len(pending):
+            self.settings["pending_index"] = kept
+            save_settings(self.settings)
         index = root / "evidence_index.csv"
-        exists = index.exists()
-        with index.open("a", newline="", encoding="utf-8-sig") as f:
-            writer = csv.DictWriter(f, fieldnames=self.INDEX_FIELDS, extrasaction="ignore")
-            if not exists:
+        try:
+            with index.open(newline="", encoding="utf-8-sig") as f:
+                reader = csv.DictReader(f)
+                fields = reader.fieldnames or self.INDEX_FIELDS
+                rows = list(reader)
+            remaining = [r for r in rows if r.get("file_name") not in names]
+            if len(remaining) == len(rows):
+                return
+            tmp = index.with_suffix(".tmp")
+            with tmp.open("w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
                 writer.writeheader()
-            writer.writerow(row)
+                writer.writerows(remaining)
+            tmp.replace(index)
+        except OSError:
+            pass  # index missing or open elsewhere; the files themselves are still removed
 
     def _index_marked_copy(self, original: Path, marked: Path):
         """Add an index row for a marked-up copy, reusing the original's workpaper labels."""
@@ -1455,81 +1630,114 @@ class SnapShotterApp:
         self._write_index_row(row)
 
     def _record_and_finish(self, saved, stamp, mode):
+        self._index_waiting = False
+        self._remember_folder(self.save_folder.get())
+        self._remember_labels()
         self._persist()
         for path, label in saved:
             self._append_index(path, label, stamp, mode)
         self.refresh_history()
         if self.markup_after.get() and len(saved) == 1:
             original = saved[0][0]
-            self.status.set("Saved. Mark up the screenshot, or click Skip.")
-            MarkupEditor(self.root, original,
-                         lambda marked: self._complete(saved, marked))
-            return
+            self.status.set("Saved. Mark it up, or press Esc to skip.")
+            try:
+                MarkupEditor(self.root, original, lambda marked: self._complete(saved, marked))
+                return
+            except Exception:
+                pass  # couldn't open the editor; finish normally
         self._complete(saved, None)
 
+    def _copy_file_to_clipboard(self, path: Path | None) -> bool:
+        if path is None or not self.copy_clipboard.get():
+            return False
+        try:
+            with Image.open(path) as im:
+                return copy_image_to_clipboard(im)
+        except Exception:
+            return False
+
+    def _index_note(self) -> str:
+        if getattr(self, "_index_waiting", False):
+            return "\nevidence_index.csv is open in another program; it will be updated once you close it."
+        return ""
+
     def _complete(self, saved, marked: Path | None):
-        """Final step after a capture (and optional markup): index, clipboard, notify."""
+        """Final step after a capture (and optional markup). Never interrupts with a dialog."""
         if marked:
             self._index_marked_copy(saved[0][0], marked)
-            self.refresh_history()
-        final = marked or (saved[0][0] if len(saved) == 1 else None)
-
-        copied = False
-        if self.copy_clipboard.get() and final is not None:
-            try:
-                with Image.open(final) as im:
-                    copied = copy_image_to_clipboard(im)
-            except Exception:
-                copied = False
+        originals = [p for p, _ in saved]
+        files = originals + ([marked] if marked else [])
+        final = marked or (originals[0] if len(originals) == 1 else None)
+        copied = self._copy_file_to_clipboard(final)
 
         self._restore_window()
-        names = [final.name] if final else [p.name for p, _ in saved]
-        bits = []
-        if marked:
-            bits.append("marked-up copy saved (original kept)")
-        if copied:
-            bits.append("copied to clipboard — Ctrl+V to paste")
-        elif self.copy_clipboard.get() and len(saved) > 1:
-            bits.append("not copied: several images (one per display)")
-        self.status.set(f"Saved {len(saved)} capture(s)" + (": " + "; ".join(bits) if bits else "")
-                        + ". Labels added to evidence_index.csv.")
+        self.refresh_history()
+        if final is not None:
+            title = "✓ Saved and copied. Paste with Ctrl+V" if copied else "✓ Saved"
+            detail = final.name + ("\nOriginal kept alongside it." if marked else "")
+        else:
+            title = f"✓ {len(saved)} screenshots saved"
+            detail = "One per display." + (" Not copied: select one below to copy it."
+                                           if self.copy_clipboard.get() else "")
+        detail += self._index_note()
+        self.status.set(title.lstrip("✓ ") + "  ·  " + (final.name if final else f"{len(saved)} files"))
         if self.open_after.get() and final is not None:
             self._open_path(final)
 
-        detail = "\n".join(names[:3]) + ("" if not bits else "\n" + " · ".join(bits))
-        if self._from_hotkey:
-            self._show_toast("✓ Evidence saved", detail)
-        elif len(saved) == 1:
-            messagebox.showinfo("Evidence saved", f"Saved successfully:\n\n{detail}\n\nWorkpaper details were added to evidence_index.csv.")
-        else:
-            messagebox.showinfo("Evidence saved", f"Saved {len(saved)} screenshots — one per display.\n\nWorkpaper details were added to evidence_index.csv.")
+        actions = []
+        if final is not None and not marked:
+            actions.append(("🖍 Mark up", lambda: self._markup(final)))
+        actions.append(("Show in folder", lambda: self._show_in_folder(final or originals[0])))
+        actions.append(("Undo", lambda: self._undo_capture(files)))
+        self._show_toast(title, detail, final or originals[0], actions)
         self._from_hotkey = False
 
-    def markup_selected(self):
-        original = self._selected_path()
-        if original is None:
-            messagebox.showinfo("Mark up", "Select a screenshot in Recent evidence first.")
-            return
+    def _markup(self, original: Path):
+        """Open the markup window for a saved screenshot; the original is never changed."""
 
         def done(marked):
             if not marked:
                 return
+            self._index_waiting = False
             self._index_marked_copy(original, marked)
             self.refresh_history()
-            msg = f"Marked-up copy saved: {marked.name}"
-            if self.copy_clipboard.get():
-                try:
-                    with Image.open(marked) as im:
-                        if copy_image_to_clipboard(im):
-                            msg += " · copied to clipboard"
-                except Exception:
-                    pass
-            self.status.set(msg)
+            copied = self._copy_file_to_clipboard(marked)
+            title = "✓ Marked copy saved and copied. Paste with Ctrl+V" if copied else "✓ Marked copy saved"
+            self.status.set(title.lstrip("✓ ") + "  ·  " + marked.name)
+            self._show_toast(title, marked.name + "\nOriginal kept alongside it." + self._index_note(), marked,
+                             [("Show in folder", lambda: self._show_in_folder(marked)),
+                              ("Undo", lambda: self._undo_capture([marked]))])
 
         try:
             MarkupEditor(self.root, original, done)
         except Exception as exc:
             messagebox.showerror("Couldn't open image", str(exc))
+
+    def markup_selected(self):
+        original = self._selected_path()
+        if original is not None:
+            self._markup(original)
+
+    def _undo_capture(self, files):
+        """Delete the screenshot(s) just saved and take them back out of the index."""
+        removed = 0
+        for path in files:
+            try:
+                Path(path).unlink()
+                removed += 1
+            except OSError:
+                pass
+        self._remove_index_rows({Path(f).name for f in files})
+        self.refresh_history()
+        text = "Capture removed" if removed else "Nothing to undo"
+        self.status.set(text + ".")
+        self._show_toast("↶ " + text, seconds=2.5)
+
+    def _show_in_folder(self, path: Path):
+        if sys.platform == "win32":
+            subprocess.Popen(["explorer", "/select,", str(path)])
+        else:
+            self._open_path(Path(path).parent)
 
     def _open_path(self, path: Path):
         try:
@@ -1559,11 +1767,25 @@ class SnapShotterApp:
             mark = "🖍 " if "_marked" in path.stem else "    "
             self.history.insert(tk.END, f" {mark}{when}    ·    {path.name}")
         if not self.history_paths:
-            self.history.insert(tk.END, "  No captures in this folder yet. Click Capture or use the shortcut.")
+            self.history.insert(tk.END, "  Nothing here yet. Your captures will appear in this list.")
             self.history.itemconfigure(0, fg=MUTED)
         if self.history_paths:
             self.history.selection_set(0)
         self._update_history_buttons()
+
+    def _update_preview(self):
+        path = self._selected_path()
+        photo = None
+        if path is not None:
+            try:
+                with Image.open(path) as im:
+                    im = im.convert("RGB")
+                    im.thumbnail((214, 112))
+                    photo = ImageTk.PhotoImage(im)
+            except Exception:
+                photo = None
+        self.preview.image = photo
+        self.preview.configure(image=photo or "", text="" if photo else "No preview")
 
     def _selected_path(self) -> Path | None:
         selection = self.history.curselection()
@@ -1589,12 +1811,8 @@ class SnapShotterApp:
 
     def show_selected(self):
         path = self._selected_path()
-        if not path:
-            return
-        if sys.platform == "win32":
-            subprocess.Popen(["explorer", "/select,", str(path)])
-        else:
-            self._open_path(path.parent)
+        if path:
+            self._show_in_folder(path)
 
 
 def main():

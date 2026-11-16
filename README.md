@@ -12,7 +12,9 @@ Snipping Tool takes the picture. SnapShotter also proves **when** it was taken, 
 - **Saved folders**: keep a drop-down list of client or engagement folders; screenshots go straight into the chosen folder.
 - **Capture from any app**: `Ctrl + Shift + F9` (configurable) works while you're in Excel, your ERP or a browser. `F9` works inside SnapShotter.
 - **Copy to clipboard**: paste straight into Excel, Word or email with `Ctrl+V`.
-- **Highlight and box markup**: the original is never changed; the marked-up version is saved as `…_marked.png` and indexed with the same labels.
+- **Nothing interrupts you**: after a capture a small preview appears in the corner with Mark up, Show in folder and Undo, then disappears on its own.
+- **It remembers**: entities, accounts, references and folders you've used are one click away.
+- **Highlight, box and redact markup**: the original is never changed; the marked-up version is saved as `…_marked.png` and indexed with the same labels.
 - **Capture modes**: area (drag to select), one screen, all screens, or one image per screen.
 
 ## Install (Windows)
