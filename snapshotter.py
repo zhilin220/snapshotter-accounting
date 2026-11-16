@@ -21,11 +21,81 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-try:
-    import mss
-    from PIL import Image, ImageDraw, ImageFont, ImageTk
-except ImportError as exc:
-    raise SystemExit("SnapShotter needs its packages. Run install.bat first.") from exc
+def _ensure_packages() -> None:
+    """If mss/Pillow are missing, offer to install them into the Python running this script.
+
+    Works the same from PyCharm, VS Code, IDLE or a command prompt; no .bat file or
+    admin rights needed (outside a virtual environment it installs with --user).
+    """
+    try:
+        import mss  # noqa: F401
+        import PIL  # noqa: F401
+        return
+    except ImportError:
+        pass
+
+    req = Path(__file__).with_name("requirements.txt")
+    in_venv = sys.prefix != getattr(sys, "base_prefix", sys.prefix)
+    cmd = [sys.executable, "-m", "pip", "install"] + ([] if in_venv else ["--user"])
+    cmd += ["-r", str(req)] if req.exists() else ["mss>=9.0.1", "Pillow>=10.0.0"]
+    manual = f'"{sys.executable}" -m pip install {"" if in_venv else "--user "}-r requirements.txt'
+
+    root = tk.Tk()
+    root.withdraw()
+    if not messagebox.askyesno(
+            "SnapShotter: one-time setup",
+            "SnapShotter needs two free packages (mss and Pillow) that aren't installed "
+            f"for this Python yet:\n\n{sys.executable}\n\n"
+            "Install them now? It takes under a minute and doesn't need admin rights.",
+            parent=root):
+        root.destroy()
+        raise SystemExit(f"SnapShotter needs mss and Pillow. Install them with:\n  {manual}")
+
+    note = tk.Toplevel(root)
+    note.title("SnapShotter")
+    note.resizable(False, False)
+    tk.Label(note, text="Installing mss and Pillow…\nThis window closes when it's done.",
+             font=("Segoe UI", 10), padx=30, pady=22).pack()
+    note.update()
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600,
+                                cwd=str(Path(__file__).parent))
+        ok, output = result.returncode == 0, (result.stdout or "") + (result.stderr or "")
+    except Exception as exc:  # pip missing, timeout, etc.
+        ok, output = False, str(exc)
+    note.destroy()
+
+    if ok:
+        import importlib
+        import site
+        user_site = site.getusersitepackages()
+        if not in_venv and user_site not in sys.path:
+            sys.path.append(user_site)  # a fresh --user folder isn't on the path yet
+        importlib.invalidate_caches()
+        try:
+            import mss  # noqa: F401,F811
+            import PIL  # noqa: F401,F811
+            root.destroy()
+            return
+        except ImportError as exc:
+            output += f"\n{exc}"
+
+    tail = "\n".join(output.strip().splitlines()[-8:])
+    hint = ""
+    if any(s in output for s in ("SSL", "ProxyError", "ConnectTimeout", "NewConnectionError", "Max retries", "from versions: none")):
+        hint = ("\n\nThis looks like your network blocking the Python package site. "
+                "Ask IT for the company proxy or package mirror, or set PyCharm's HTTP proxy.")
+    messagebox.showerror("SnapShotter: setup failed",
+                         f"Couldn't install the packages.{hint}\n\nYou can try this yourself "
+                         f"(e.g. in PyCharm's Terminal tab):\n{manual}\n\nLast output:\n{tail}",
+                         parent=root)
+    root.destroy()
+    raise SystemExit(1)
+
+
+_ensure_packages()
+import mss  # noqa: E402
+from PIL import Image, ImageDraw, ImageFont, ImageTk  # noqa: E402
 
 # mss 10+ provides mss.MSS (and deprecates mss.mss); mss 9 only has mss.mss.
 _new_mss = getattr(mss, "MSS", None) or mss.mss

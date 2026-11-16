@@ -22,6 +22,16 @@ Snipping Tool takes the picture. SnapShotter also proves **when** it was taken, 
 3. Double-click `install.bat` once.
 4. Double-click `run.bat` to start SnapShotter.
 
+### Can't run .bat files? (common on work computers)
+
+Run it from PyCharm, VS Code or any Python you're allowed to use:
+
+1. Open the folder as a project and pick a Python 3.10+ interpreter.
+2. Run `snapshotter.py`.
+3. On first run SnapShotter offers to install its two packages (mss and Pillow). Click **Yes**; no admin rights needed.
+
+Or install them yourself in PyCharm's **Terminal** tab: `python -m pip install -r requirements.txt`
+
 See [README.txt](README.txt) for the full user guide.
 
 ## Note

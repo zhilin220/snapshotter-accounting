@@ -12,6 +12,17 @@ INSTALL
 3. Double-click install.bat once.
 4. Double-click run.bat whenever you want to use SnapShotter.
 
+CAN'T RUN .BAT FILES? (work computers)
+--------------------------------------
+Run snapshotter.py from PyCharm, VS Code or any Python you're allowed
+to use (File > Open the folder, choose a Python 3.10+ interpreter, then
+right-click snapshotter.py > Run). The first time, SnapShotter offers to
+install mss and Pillow for you; click Yes. No admin rights are needed.
+If that fails, run this in PyCharm's Terminal tab:
+    python -m pip install -r requirements.txt
+A connection/SSL error usually means the company network blocks the
+Python package site: ask IT for the proxy or internal package mirror.
+
 WORKFLOW (v4.0 layout)
 ----------------------
 1  Label this evidence: entity, period, account, JE/ticket ref (all
